@@ -1,0 +1,229 @@
+---
+title: "Flow Binning of FCS Exported Data"
+author: "Wisam Fares"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(pacman)
+
+p_load(tidyverse)
+```
+
+```{r load-data}
+# Starting with one of the subdirecotires that has the 5 Laser data
+
+
+
+```
+## Steps to do
+
+# (1) Load the data frame -- start with 2024-09-04 as the test case
+
+```{r, include=FALSE}
+
+data_dir = "Exported Data/TGFB1/2024-09-04/"
+
+csv_files <- list.files(path = data_dir, pattern = "\\.csv$", full.names = TRUE)
+
+all_data <- csv_files %>%
+  set_names(basename(csv_files)) %>%  # optional: name each element by file name
+  map_dfr(read_csv, .id = "Sample_Name") %>% # read each file and combine, keep filename
+  mutate(Sample_Name = str_replace(Sample_Name, ".csv", "")) %>% # Remove .csv from Sample_Name name
+  mutate(Cell_Line = str_extract(Sample_Name, "^[^_]+")) %>% # Extract Cell Line from
+  mutate(TGFB1_conc = str_extract(Sample_Name, "(?<=_).*?(?=T)")) %>% 
+  mutate(TGFB1_conc = as.numeric(TGFB1_conc)) %>%
+  relocate(Sample_Name, Cell_Line, TGFB1_conc) %>%
+  # (2) Filter to only include columns of interest, B1.A and YG1.A for 5 laser, HA and pSMAD for 3 laser
+  select("Sample_Name", "Cell_Line", "TGFB1_conc", "B1-A", "YG1-A") %>%
+  rename(HA = `B1-A`,
+         pSMAD2 = `YG1-A`) %>%
+  ## Filter outliers 
+  group_by(Cell_Line, TGFB1_conc) %>%
+  # calculate the quantiles for pSMAD2 and HA
+  mutate(
+    p001_pSMAD2 = quantile(pSMAD2, 0.001),
+    p999_pSMAD2 = quantile(pSMAD2, 0.999),
+    p001_HA = quantile(HA, 0.001),
+    p999_HA = quantile(HA, 0.999)
+  ) %>%
+  # Keep oonly rows within the 0.1-99.9 percentile
+  filter(pSMAD2 >= p001_pSMAD2, pSMAD2 <= p999_pSMAD2,
+         HA >= p001_HA, HA <= p999_HA) %>%
+  ungroup() %>%
+  select(-p001_pSMAD2, -p999_pSMAD2, -p001_HA, -p999_HA) # Remove percentile columns
+
+View(all_data)
+```
+
+
+
+
+
+```{r, plot-data}
+# Plot all data
+data = all_data
+
+ggplot(data, aes(x = HA, y = pSMAD2))+
+  facet_grid(Cell_Line ~ TGFB1_conc)+
+  scale_x_log10()+
+  scale_y_log10()+
+  geom_bin2d(bins = 128)+
+  scale_fill_gradient(low = "blue", high = "red")
+
+ggplot(data, aes(x = pSMAD2))+
+  facet_grid(Cell_Line ~ TGFB1_conc)+
+  scale_x_log10()+
+  geom_histogram()
+```
+```{r, testing-parameters}
+# Going to be testing the following parameters for visualization across flow data
+# (1) pSMAD2 Threshold from the 0 ng/ml cytokine Luc-HA sample
+# (2) Number of bins after the threshold is set
+# (3) Using mean/median for visualization purposes
+
+# Set the pecentile cutoffs for pSMAD2 and HA
+pSMAD2_perc_cutoff = 0.9 # 90th percentile cutoff starting point
+HA_perc_cutoff = 0.9 # 90th pecentile for HA 
+
+
+# Calculate pSMAD2 threshold
+pSMAD2_thresh = all_data %>%
+  filter(Cell_Line == "Luc",
+         TGFB1_conc == 0) %>%
+  summarize(p_pSMAD2 = quantile(pSMAD2, pSMAD2_perc_cutoff)) %>%
+  pull(p_pSMAD2)
+
+# Calculate HA threshold
+HA_thresh = all_data %>%
+  filter(Cell_Line == "Luc",
+         TGFB1_conc == 0) %>%
+  summarize(p_HA = quantile(HA, HA_perc_cutoff)) %>%
+  pull(p_HA)
+```
+
+```{r, binning-analysis}
+n_bins = 5 
+
+max_HA = all_data %>%
+  summarize(max_HA = max(HA)) %>%
+  pull(max_HA)
+
+bins = exp(seq(log(HA_thresh), log(max_HA), length.out = n_bins + 1)) # Log spaced bin edges
+
+df = all_data %>%
+  filter(Cell_Line == "R3") %>%
+  filter(pSMAD2 > pSMAD2_thresh) %>%
+  filter(HA > HA_thresh) %>%
+  mutate(HA_bin = cut(HA, breaks = bins, inlude.lowest = TRUE))
+  
+
+binned_summ = df %>%
+  group_by(Cell_Line, TGFB1_conc, HA_bin) %>%
+  summarize(pSMAD2_median = median(pSMAD2),
+            pSMAD2_mean = mean(pSMAD2),
+            n_cells = n())
+```
+
+```{r, visualize-bins}
+ggplot(binned_summ, aes(x = HA_bin, y = pSMAD2_median, size= n_cells)) +
+  facet_wrap( ~ TGFB1_conc) +
+  geom_point()
+
+```
+```{r, bootstrap}
+# Function to compute summary stats
+boot_summary <- function(data, n_boot = 1000) {
+  # Bootstrap each bin
+  boot_results <- replicate(n_boot, {
+    sample_data <- data[sample(nrow(data), replace = TRUE), ]
+    c(
+      mean_pSMAD2 = mean(sample_data$pSMAD2),
+      median_pSMAD2 = median(sample_data$pSMAD2)
+    )
+  }, simplify = FALSE)
+  
+  # Convert to data frame
+  boot_df <- bind_rows(boot_results)
+  
+  # Compute mean and 95% CI for each stat
+  tibble(
+    mean_pSMAD2 = mean(boot_df$mean_pSMAD2),
+    mean_pSMAD2_low = quantile(boot_df$mean_pSMAD2, 0.025),
+    mean_pSMAD2_high = quantile(boot_df$mean_pSMAD2, 0.975),
+    median_pSMAD2 = mean(boot_df$median_pSMAD2),
+    median_pSMAD2_low = quantile(boot_df$median_pSMAD2, 0.025),
+    median_pSMAD2_high = quantile(boot_df$median_pSMAD2, 0.975),
+    n_cells = nrow(data)
+  )
+}
+
+binned_boot <- df %>%
+  filter(!is.na(HA_bin)) %>%
+  group_by(Cell_Line, TGFB1_conc, HA_bin) %>%
+  group_modify(~ boot_summary(.x, n_boot = 1000)) %>%
+  ungroup()
+```
+
+
+```{r, viz-binned-analysis}
+ggplot(binned_boot, aes(x = HA_bin, y = mean_pSMAD2)) +
+  facet_grid( ~ TGFB1_conc) +
+  geom_point() +
+  geom_errorbar(aes(ymin = mean_pSMAD2_low, ymax = mean_pSMAD2_high), width = 0.2) +
+  theme_minimal() +
+  scale_x_discrete(labels = function(x) seq_along(x))+
+  labs(x = "HA Bin", y = "Mean pSMAD2 ± 95% CI")+
+  ggtitle("HA Bins Analysis - pSMAD2 Mean")
+
+ggplot(binned_boot, aes(x = HA_bin, y = median_pSMAD2)) +
+  facet_grid( ~ TGFB1_conc) +
+  geom_point() +
+  geom_errorbar(aes(ymin = median_pSMAD2_low, ymax = median_pSMAD2_high), width = 0.2) +
+  theme_minimal() +
+  scale_x_discrete(labels = function(x) seq_along(x))+
+  labs(x = "HA Bin", y = "Median pSMAD2 ± 95% CI")+
+  ggtitle("HA Bins Analysis - pSMAD2 Median")
+
+```
+```{r}
+ggplot(df, aes(x = HA, y= pSMAD2))+
+  facet_grid(TGFB1_conc ~ Cell_Line)+
+  geom_point()+
+  scale_x_log10()+
+  scale_y_log10()
+```
+
+## Creating a function that will allow for high throughput testing
+
+```{r}
+analyze_bins = function(data_dir,
+                        pSMAD2_perc_cutoff = 0.9,
+                        HA_perc_cutoff = 0.9,
+                        n_bins = 5,
+                        n_boot = 1000) {
+  
+}
+```
+
+
+
+# (4) Create different arguemnts of interest:
+  # (i) Size of bins
+  
+  # (ii) Bootstrapping cells, how many Sample_Names of what size.
+  
+  # (iii) Threshold of pSMAD2 from Luc 0T Sample_Name as cutoff  
+
+
+## SCRATCH WORK BELOW
+
+```{r}
+# This will be used to analyze other similar fcs files
+subdirs = list.dirs("Exported Data/TGFB1", recursive = FALSE)
+subdirs
+
+
+```
+

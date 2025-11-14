@@ -1,0 +1,915 @@
+---
+title: "Cleaned up Flow Binning"
+author: "Wisam Fares"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(fs)
+```
+
+
+```{r, helper-functions}
+
+## Analysis Pipeline Functions
+loadData = function(data_dir, is_3laser_experiment){
+  # Loads all samples from a given experiment into a single data frame
+  # Cleans up data by selecting pSMAD2 and HA columns, and removing outliers
+  # Outliers removed by filtering to 0.1 - 99.9 percentiles
+  # Load Data
+  csv_files <- list.files(path = data_dir, pattern = "\\.csv$", full.names = TRUE)
+
+  if (is_3laser_experiment){
+    old_HA_colname = "HA"
+    old_pSMAD2_colname = "pSMAD2"
+  }
+    else {
+      old_HA_colname = "B1-A"
+      old_pSMAD2_colname = "YG1-A"
+    }
+    
+  
+  all_data <- csv_files %>%
+    set_names(basename(csv_files)) %>%  # optional: name each element by file name
+    map_dfr(~read_csv(.x, show_col_types = FALSE), .id = "Sample_Name") %>% # read each file and combine, keep filename
+    mutate(Sample_Name = str_replace(Sample_Name, ".csv", "")) %>% # Remove .csv from Sample_Name name
+    
+    # Extract Cell Name
+    mutate(Cell_Line = str_extract(Sample_Name, "^[^_]+")) %>% # Extract Cell Line from
+    
+    # Extract Ligand Info
+    mutate(Ligand = str_extract(Sample_Name, ".$")) %>%
+    mutate(Ligand = case_when(
+      Ligand == "T" ~ "TGFB1",
+      Ligand == "G" ~ "GDF11",
+      TRUE ~ "error"
+    )) %>%
+    
+    mutate(Ligand_conc = str_extract(Sample_Name, "(?<=_).*?(?=[TG])")) %>% 
+    mutate(Ligand_conc = as.numeric(Ligand_conc)) %>%
+    
+    # Clean up data frame
+    relocate(Sample_Name, Cell_Line, Ligand, Ligand_conc) %>%
+    # (2) Filter to only include columns of interest, B1.A and YG1.A for 5 laser, HA and pSMAD for 3 laser
+    select("Sample_Name", "Cell_Line", "Ligand", "Ligand_conc", starts_with(old_HA_colname), starts_with(old_pSMAD2_colname)) %>%
+    rename_with(~ "HA", starts_with(old_HA_colname))%>%
+    rename_with(~ "pSMAD2", starts_with(old_pSMAD2_colname)) %>%
+    ## Log Transform HA and pSMAD2
+    mutate(pSMAD2 = case_when(
+             pSMAD2<=0 ~ 1e-1,
+             TRUE ~ pSMAD2
+             ),
+           HA = case_when(
+             HA<=0 ~ 1e-1,
+             TRUE ~ HA
+           ),
+           pSMAD2 = log10(pSMAD2),
+           HA = log10(HA)
+           ) %>%
+    
+    ## Filter outliers 
+    group_by(Cell_Line, Ligand, Ligand_conc) %>%
+    
+    # calculate the quantiles for pSMAD2 and HA
+    mutate(
+      p001_pSMAD2 = quantile(pSMAD2, 0.001),
+      p999_pSMAD2 = quantile(pSMAD2, 0.999),
+      p001_HA = quantile(HA, 0.001),
+      p999_HA = quantile(HA, 0.999)
+    ) %>%
+    
+      # Keep only rows within the 0.1-99.9 percentile
+    filter(pSMAD2 >= p001_pSMAD2, 
+           pSMAD2 <= p999_pSMAD2,
+           HA >= p001_HA, 
+           HA <= p999_HA) %>%
+    ungroup() %>%
+    select(-p001_pSMAD2, -p999_pSMAD2, -p001_HA, -p999_HA) # Remove percentile columns
+  
+    return(all_data)
+}
+
+filterData = function(all_data, pSMAD2_perc_cutoff, HA_perc_cutoff){
+  # Uses perc_cutoffs to determine thresholds from Luc - No Cyto sample
+  
+  # Calculate threshold 
+  pSMAD2_thresh = all_data %>%
+    filter(Cell_Line == "Luc",
+       Ligand_conc == 0) %>%
+    summarize(p_pSMAD2 = quantile(pSMAD2, pSMAD2_perc_cutoff)) %>%
+    pull(p_pSMAD2)
+  
+  HA_thresh = all_data %>%
+    filter(Cell_Line == "Luc",
+           Ligand_conc == 0) %>%
+    summarize(p_HA = quantile(HA, HA_perc_cutoff)) %>%
+    pull(p_HA)
+  
+  # Use thresholds to filter data
+  filtered_data = all_data %>%
+    filter(Cell_Line == "R3") %>%
+    filter(pSMAD2 > !!pSMAD2_thresh) %>%
+    filter(HA > !!HA_thresh)
+  
+  return(filtered_data)
+}
+
+binHA = function(filtered_data, n_bins){
+# Bin HA data based off n_bins using previous HA_perc cutoff (new min) and max HA
+
+# Calculate min and max HA 
+filt_data_summ = filtered_data %>%
+  summarize(min_HA = min(HA),
+            max_HA = max(HA),
+            # Adding 90p to prevent bins with low numbers of cells
+            p_HA = quantile(HA, 0.95)) 
+
+# Pull min and max from summary
+min_HA = pull(filt_data_summ, min_HA)
+max_HA = pull(filt_data_summ, max_HA)
+p_HA = pull(filt_data_summ, p_HA)
+
+
+# Create bin edges --- Trying with p90_HA instead of max_HA
+bins = seq(min_HA-1e-1, max_HA+1e-1, length.out = n_bins + 1) # Log spaced bin edges
+
+# Use bins to cut data 
+binned_data = filtered_data %>%
+  mutate(HA_bin = cut(HA, breaks = bins, include.lowest = TRUE),
+         binID = as.integer(HA_bin))
+
+return(binned_data)
+}
+
+bootstrapBinnedData = function(binned_data, n_boot){
+  boot_summary <- function(binned_data, n_boot) {
+    # Bootstrap each bin
+    boot_results <- replicate(n_boot, {
+      sample_data <- binned_data[sample(nrow(binned_data), replace = TRUE), ]
+      c(
+        mean_pSMAD2 = mean(sample_data$pSMAD2),
+        median_pSMAD2 = median(sample_data$pSMAD2)
+      )
+    }, simplify = FALSE)
+    
+    # Convert to data frame
+    boot_df <- bind_rows(boot_results)
+    
+    # Compute mean and 95% CI for each stat
+    tibble(
+      mean_pSMAD2 = mean(boot_df$mean_pSMAD2, na.rm = TRUE),
+      mean_pSMAD2_low = quantile(boot_df$mean_pSMAD2, 0.025, na.rm = TRUE),
+      mean_pSMAD2_high = quantile(boot_df$mean_pSMAD2, 0.975, na.rm = TRUE),
+      median_pSMAD2 = mean(boot_df$median_pSMAD2, na.rm = TRUE),
+      median_pSMAD2_low = quantile(boot_df$median_pSMAD2, 0.025, na.rm = TRUE),
+      median_pSMAD2_high = quantile(boot_df$median_pSMAD2, 0.975, na.rm = TRUE),
+      n_cells = nrow(binned_data)
+    )
+  }
+  
+  binned_boot <- binned_data %>%
+  filter(!is.na(HA_bin)) %>%
+  group_by(Cell_Line, Ligand_conc, HA_bin) %>%
+  group_modify(~ boot_summary(.x, n_boot = 1000)) %>%
+  ungroup()
+  
+  return(binned_boot)
+}
+
+
+
+## Plotting Functions
+dotPlotBinData = function(binned_data, summ_stat = "mean"){
+  binned_summ = binned_data %>%
+  group_by(Cell_Line, Ligand, Ligand_conc, HA_bin) %>%
+  summarize(pSMAD2_median = median(pSMAD2),
+            pSMAD2_mean = mean(pSMAD2),
+            n_cells = n())
+  
+  if (summ_stat == "mean"){
+    p = ggplot(binned_summ, aes(x = HA_bin, y = pSMAD2_mean, size = n_cells))+
+      facet_grid(Ligand~Ligand_conc)+
+      geom_point()+
+      theme_minimal() +
+      scale_x_discrete(labels = function(x) seq_along(x))
+      
+  }
+  else if (summ_stat == "median"){
+    p = ggplot(binned_summ, aes(x = HA_bin, y = pSMAD2_median, size = n_cells))+
+      facet_grid(Ligand~Ligand_conc)+
+      geom_point()+
+      theme_minimal() +
+      scale_x_discrete(labels = function(x) seq_along(x))
+  }
+  else {
+    stop("Error: summ_stat can only be \"mean\" or \"median\"")
+  }
+  
+  print(p)
+}
+
+plotBootstrapResults = function(binned_boot, summ_stat = "mean"){
+   
+  if (summ_stat == "mean"){
+    p = ggplot(binned_boot, aes(x = HA_bin, y = mean_pSMAD2)) +
+      facet_grid(~ Ligand_conc) +
+      geom_point() +
+      geom_errorbar(aes(ymin = mean_pSMAD2_low, ymax = mean_pSMAD2_high), width = 0.2) +
+      theme_minimal() +
+      scale_x_discrete(labels = function(x) seq_along(x))+
+      labs(x = "HA Bin", y = "Mean pSMAD2 ± 95% CI")+
+      ggtitle("HA Bins Analysis - pSMAD2 Mean")
+  }
+  else if (summ_stat == "median"){
+    p = ggplot(binned_boot, aes(x = HA_bin, y = median_pSMAD2)) +
+      facet_grid(~ Ligand_conc) +
+      geom_point() +
+      geom_errorbar(aes(ymin = median_pSMAD2_low, ymax = median_pSMAD2_high), width = 0.2) +
+      theme_minimal() +
+      scale_x_discrete(labels = function(x) seq_along(x))+
+      labs(x = "HA Bin", y = "Median pSMAD2 ± 95% CI")+
+      ggtitle("HA Bins Analysis - pSMAD2 Median")
+  }
+  else {
+    stop("Error: summ_stat can only be \"mean\" or \"median\"")
+  }
+    
+  print(p)
+}
+
+# Supplemental/Debugging Plotting Functions
+plotFlowDensity = function(data){
+  # Plots flow gradient plot for comparison to FCS Express
+  p = ggplot(data, aes(x = HA, y = pSMAD2))+
+        facet_grid(Cell_Line ~ Ligand_conc)+
+        scale_x_log10()+
+        scale_y_log10()+
+        geom_bin2d(bins = 128)+
+        scale_fill_gradient(low = "blue", high = "red")
+  
+  print(p)
+}
+
+```
+
+```{r, binning-analysis-function}
+analyze_bins = function(data_dir,
+                        pSMAD2_perc_cutoff = 0.9,
+                        HA_perc_cutoff = 0.9,
+                        n_bins = 5,
+                        n_boot = 1000,
+                        is_3laser_experiment = FALSE) {
+    
+    # (1) Load Data from directory
+    all_data = loadData(data_dir, is_3laser_experiment)
+    
+    # (2) Filter Data based on pSMAD2 and HA threshold of Luc - No Cytokine 
+    filtered_data = filterData(all_data, pSMAD2_perc_cutoff, HA_perc_cutoff)
+    
+    # (3) Bin Data
+    binned_data = binHA(filtered_data, n_bins)
+    
+    # (4) Bootstrap Binned Data
+    binned_boot = bootstrapBinnedData(binned_data)
+    
+    # (5) Plot Binned Analysis
+    plotBootstrapResults(binned_boot, summ_stat = "mean")
+    
+    ## Supplemental Checks:
+    # (S1) Plot original density plots to compare to FCS Express
+    plotFlowDensity(all_data)
+    
+    # (S2) Check Filtered Data to make sure the shape looks correct
+    plotFlowDensity(filtered_data)
+    
+    # (S3) Dot plot of binned data
+    dotPlotBinData(binned_data)
+    
+    list(binned_data = binned_data, binned_boot = binned_boot)
+}
+```
+
+```{r, test-fxn}
+data_dir = "Exported Data/TGFB1/5 Laser Experiments/2024-09-04/"
+
+results = analyze_bins(data_dir)
+```
+
+
+```{r, compare-binning-parameters}
+compareBinningParameters = function(data_dir, 
+                                    pSMAD2_perc_cutoff_list = c(0.9, 0.5, 0),
+                                    HA_perc_cutoff_list = 0.9,
+                                    n_bins_list = c(5,8,10,20),
+                                    is_3laser_experiment = FALSE){
+  # Comparing different parameters to compare final traces
+  
+  # (1) Load Data from directory
+  all_data = loadData(data_dir, is_3laser_experiment)
+    
+  # Create a grid of all parameter combinations
+  param_grid <- expand.grid(
+    pSMAD2_perc_cutoff = pSMAD2_perc_cutoff_list,
+    HA_perc_cutoff = HA_perc_cutoff_list,
+    n_bins = n_bins_list
+  )
+  
+  # Run the analysis for each parameter combination
+  agg_boot <- param_grid %>%
+    pmap_dfr(function(pSMAD2_perc_cutoff, HA_perc_cutoff, n_bins) {
+      
+      filtered_data <- filterData(all_data, pSMAD2_perc_cutoff, HA_perc_cutoff)
+      binned_data   <- binHA(filtered_data, n_bins)
+      temp_boot     <- bootstrapBinnedData(binned_data)
+      
+      # Add parameter info as columns
+      temp_boot %>%
+        mutate(
+          pSMAD2_perc_cutoff = pSMAD2_perc_cutoff,
+          HA_perc_cutoff     = HA_perc_cutoff,
+          n_bins             = n_bins,
+          binID              = as.integer(HA_bin)
+        )
+    }) %>%
+    mutate(param_combo = paste0("pSMAD2_", pSMAD2_perc_cutoff,
+                                "_HA_", HA_perc_cutoff,
+                                "_bins_", n_bins))
+}
+```
+
+```{r, run-Binning-Parmaters-Analysis}
+data_dir = "Exported Data/TGFB1/5 Laser Experiments/2024-09-04/"
+
+agg_boot = compareBinningParameters(data_dir,
+                                    pSMAD2_perc_cutoff_list = c(0.9, 0.5, 0),
+                                    HA_perc_cutoff_list = 0.9,
+                                    n_bins_list = c(5,8,10,20),
+                                    is_3laser_experiment = FALSE)
+```
+
+
+```{r fig.width=16, fig.height=8, compare-figure-parameters}
+agg_boot = agg_boot %>%
+  group_by(n_bins) %>%
+  mutate(normalizeBinLocation = binID/n_bins)%>%
+  ungroup() %>%
+  mutate(pSMAD2_perc_cutoff = as.factor(pSMAD2_perc_cutoff)) %>%
+  mutate(pSMAD2_perc_cutoff = fct_rev(pSMAD2_perc_cutoff))
+
+for(i in unique(agg_boot$n_bins)){
+  temp = agg_boot %>%
+  filter(n_bins == i)
+
+p = ggplot(temp, aes(x = normalizeBinLocation, y = log10(mean_pSMAD2))) +
+  geom_point() +
+  geom_errorbar(aes(ymin = log10(mean_pSMAD2_low), ymax = log10(mean_pSMAD2_high)), width = 0.02) +
+  facet_grid(pSMAD2_perc_cutoff ~ Ligand_conc, scales = "free", labeller = label_both )+
+  labs(
+    x = "Normalized HA (min-max)",
+    y = "log10(Mean pSMAD2 ± 95% CI)",
+    title = "Binned pSMAD2 Traces by pSMAD2 percentile cutoff and TGFB1 (ng/ml)",
+    subtitle = paste0("2024-09-04, (n_bins = ", i, ")")
+  )
+
+  print(p)
+}
+
+
+for(i in unique(agg_boot$pSMAD2_perc_cutoff)){
+   temp = agg_boot %>%
+  filter(pSMAD2_perc_cutoff == i)
+
+p = ggplot(temp, aes(x = normalizeBinLocation, y = log10(mean_pSMAD2))) +
+  geom_point() +
+  geom_errorbar(aes(ymin = log10(mean_pSMAD2_low), ymax = log10(mean_pSMAD2_high)), width = 0.02) +
+  facet_grid(n_bins ~ Ligand_conc, scales = "free", labeller = label_both )+
+  labs(
+    x = "Normalized HA (min-max)",
+    y = "log10(Mean pSMAD2 ± 95% CI)",
+    title = "Binned pSMAD2 Traces by pSMAD2 percentile cutoff and TGFB1 (ng/ml)",
+    subtitle = paste0("2024-09-04, (n_bins = ", i, ")")
+  )
+
+  print(p)
+  }
+```
+
+
+```{r, load-all-data-function}
+loadAllData <- function(data_dir) {
+  
+  # Step 1: get all experiment folders (two levels deep)
+  experiment_folders <- dir_ls(data_dir, recurse = 2, type = "directory")
+  
+  # Step 2: filter folders that contain CSVs
+  experiment_folders <- experiment_folders[map_lgl(experiment_folders, ~ length(dir_ls(.x, glob = "*.csv")) > 0)]
+  
+  # Step 3: map loadData over all experiment folders
+  all_data <- experiment_folders %>%
+    set_names(experiment_folders) %>%
+    map_dfr(~{
+      path <- .x
+      path_parts <- path_split(path)[[1]]  # split path into components
+      
+      ligand <- path_parts[length(path_parts) - 2]
+      instrument <- path_parts[length(path_parts) - 1]
+      experiment <- path_parts[length(path_parts)]
+      
+      is_3laser_experiment <- grepl("3 Laser", instrument)
+      
+      loadData(path, is_3laser_experiment) %>%
+        mutate(
+          Instrument = instrument,
+          Experiment = experiment
+        )
+    })
+  
+  return(all_data)
+}
+```
+
+```{r}
+data_dir = "Exported Data"
+
+all_exp_data = loadAllData(data_dir)
+```
+
+```{r}
+# For all the data, it will be ncessary to normalize the fluorescence values 
+# across different experiments. 
+
+# First Pass: Dividing by the pSMAD2_threshold 
+# -- Note: this may require some later scaling depending on the ranges
+
+run_bootstrap_analysis_pipeline = function(data_dir, 
+                                           pSMAD2_perc_cutoff = 0.9,
+                                           HA_perc_cutoff = 0.9,
+                                           n_bins = 8,
+                                           n_boot = 1000){
+  all_exp_data = loadAllData(data_dir)
+  
+  
+  # (2) Filter Data based on pSMAD2 and HA threshold of Luc - No Cytokine 
+    filtered_data = all_exp_data %>%
+      group_by(Ligand, Experiment) %>%
+      ## Apply filterData to each group
+      group_modify(~ filterData(.x, # All samples for a given ligand and experiment
+                                pSMAD2_perc_cutoff, 
+                                HA_perc_cutoff)) %>%
+      ungroup()
+    
+    # (3) Bin Data
+    binned_data = filtered_data %>%
+      group_by(Ligand, Experiment) %>%
+      group_modify(~ binHA(.x, n_bins)) %>%
+      ungroup()
+    
+    
+    # (4) Bootstrap Binned Data
+    binned_boot = binned_data %>%
+      group_by(Ligand, Experiment) %>%
+      group_modify(~bootstrapBinnedData(.x, n_boot)) %>%
+      ungroup()
+  
+}
+
+```
+
+```{r}
+data_dir = "Exported Data"
+
+binned_boot = run_bootstrap_analysis_pipeline(data_dir, 
+                                           pSMAD2_perc_cutoff = 0.75,
+                                           HA_perc_cutoff = 0.9,
+                                           n_bins = 8,
+                                           n_boot = 1000)
+
+binned_boot = binned_boot %>%
+  group_by(Ligand, Experiment,Ligand_conc) %>%
+  arrange(HA_bin) %>%
+  mutate(binID = row_number()) %>%
+  ungroup()
+
+for(ligand in unique(binned_boot$Ligand)){
+  temp = binned_boot %>%
+    filter(Ligand == ligand)
+  
+  p = ggplot(temp, aes(x = binID, y = log10(mean_pSMAD2)))+
+      geom_point()+
+      geom_errorbar(aes(ymin = log10(mean_pSMAD2_low), ymax = log10(mean_pSMAD2_high)), width = 0.2) +
+      facet_grid(Experiment ~ Ligand_conc, scale = "free", 
+                 labeller = labeller(.cols = label_both))+
+      labs(title = ligand)
+
+  print(p)
+}
+```
+
+```{r}
+data_dir = "Exported Data"
+
+binned_boot = run_bootstrap_analysis_pipeline(data_dir, 
+                                           pSMAD2_perc_cutoff = 0.75,
+                                           HA_perc_cutoff = 0.9,
+                                           n_bins = 5,
+                                           n_boot = 1000)
+
+binned_boot = binned_boot %>%
+  group_by(Ligand, Experiment,Ligand_conc) %>%
+  arrange(HA_bin) %>%
+  mutate(binID = row_number()) %>%
+  ungroup()
+
+for(ligand in unique(binned_boot$Ligand)){
+  temp = binned_boot %>%
+    filter(Ligand == ligand)
+  
+  p = ggplot(temp, aes(x = binID, y = log10(mean_pSMAD2)))+
+      geom_point()+
+      facet_grid(Experiment ~ Ligand_conc, scale = "free", 
+                 labeller = labeller(.cols = label_both))+
+      geom_errorbar(aes(ymin = log10(mean_pSMAD2_low), ymax = log10(mean_pSMAD2_high)), width = 0.2) +
+      labs(title = ligand)
+
+  print(p)
+}
+
+
+# Plot with Experiments as different colors
+for(ligand in unique(binned_boot$Ligand)){
+  temp = binned_boot %>%
+    filter(Ligand == ligand)
+  
+  p = ggplot(temp, aes(x = binID, y = log10(mean_pSMAD2), color = Experiment))+
+      geom_point()+
+      facet_grid(~ Ligand_conc, scale = "free", 
+                 labeller = labeller(.cols = label_both))+
+      geom_errorbar(aes(ymin = log10(mean_pSMAD2_low), ymax = log10(mean_pSMAD2_high)), width = 0.2) +
+      labs(title = ligand)
+
+  print(p)
+}
+
+```
+
+```{r}
+ggplot(binned_boot, aes(x = log10(n_cells)))+
+  geom_histogram()
+
+filt_binned_boot = binned_boot %>%
+  filter(n_cells > 30)
+
+ggplot(filt_binned_boot, aes(x = log10(n_cells)))+
+  geom_histogram()
+
+for(ligand in unique(filt_binned_boot$Ligand)){
+  temp = filt_binned_boot %>%
+    filter(Ligand == ligand)
+  
+  p = ggplot(temp, aes(x = binID, y = log10(mean_pSMAD2)))+
+      geom_point()+
+      facet_grid(Experiment ~ Ligand_conc, scale = "free", 
+                 labeller = labeller(.cols = label_both))+
+      geom_errorbar(aes(ymin = log10(mean_pSMAD2_low), ymax = log10(mean_pSMAD2_high)), width = 0.2) +
+      labs(title = ligand)
+
+  print(p)
+}
+
+```
+
+
+```{r fig.width=10, fig.height=8}
+# Normalizing pSMAd Expression 
+norm_binned_boot = binned_boot %>%
+  group_by(Ligand,Experiment) %>%
+  mutate(control_mean = mean_pSMAD2[Ligand_conc == 0 & binID == 1],
+         control_max = max(mean_pSMAD2)) %>%
+  mutate(norm_mean = (mean_pSMAD2 - control_mean) / (control_max - control_mean) ,
+         norm_mean_low = (mean_pSMAD2_low - control_mean)/ (control_max - control_mean),
+         norm_mean_high = (mean_pSMAD2_high - control_mean)/ (control_max - control_mean)
+         ) %>%
+  mutate(control_median = median_pSMAD2[Ligand_conc == 0 & binID == 1],
+         control_median_max = max(median_pSMAD2)) %>%
+  mutate(norm_median = (median_pSMAD2 - control_median) / (control_median_max - control_median),
+         norm_median_low = (median_pSMAD2_low - control_median)/ (control_median_max - control_median),
+         norm_median_high = (median_pSMAD2_high - control_median)/ (control_median_max - control_median)) %>%
+  ungroup()
+
+for (ligand in unique(norm_binned_boot$Ligand)){
+   temp = norm_binned_boot %>%
+    filter(Ligand == ligand)
+  
+  p = ggplot(temp, aes(x = binID, y = norm_mean, color = Experiment))+
+      geom_point()+
+      facet_grid(~ Ligand_conc, 
+                 labeller = labeller(.cols = label_both))+
+      labs(title = ligand)
+
+  print(p)
+}
+
+
+for (ligand in unique(norm_binned_boot$Ligand)){
+   temp = norm_binned_boot %>%
+    filter(Ligand == ligand)
+  
+  p = ggplot(temp, aes(x = binID, y = norm_mean))+
+      geom_point()+
+      facet_grid(Experiment ~ Ligand_conc, 
+                 labeller = labeller(.cols = label_both))+
+      geom_errorbar(aes(ymin = norm_mean_low, ymax = norm_mean_high), width = 0.2) +
+      labs(title = ligand)
+
+  print(p)
+}
+
+```
+## Trying with bins = 4 
+
+```{r}
+data_dir = "Exported Data"
+
+binned_boot = run_bootstrap_analysis_pipeline(data_dir, 
+                                           pSMAD2_perc_cutoff = 0.9,
+                                           HA_perc_cutoff = 0.9,
+                                           n_bins = 4,
+                                           n_boot = 1000)
+
+binned_boot = binned_boot %>%
+  group_by(Ligand, Experiment,Ligand_conc) %>%
+  arrange(HA_bin) %>%
+  mutate(binID = row_number()) %>%
+  ungroup()
+```
+
+
+```{r fig.width = 10, fig.hegith = 8}
+for(ligand in unique(binned_boot$Ligand)){
+  temp = binned_boot %>%
+    filter(Ligand == ligand)
+  
+  p = ggplot(temp, aes(x = binID, y = log10(mean_pSMAD2)))+
+      geom_point()+
+      facet_grid(Experiment ~ Ligand_conc, scale = "free", 
+                 labeller = labeller(.cols = label_both))+
+      geom_errorbar(aes(ymin = log10(mean_pSMAD2_low), ymax = log10(mean_pSMAD2_high)), width = 0.2) +
+      labs(title = ligand)
+
+  print(p)
+}
+
+
+# Plot with Experiments as different colors
+for(ligand in unique(binned_boot$Ligand)){
+  temp = binned_boot %>%
+    filter(Ligand == ligand)
+  
+  p = ggplot(temp, aes(x = binID, y = log10(mean_pSMAD2), color = Experiment))+
+      geom_point()+
+      facet_grid(~ Ligand_conc, scale = "free", 
+                 labeller = labeller(.cols = label_both))+
+      geom_errorbar(aes(ymin = log10(mean_pSMAD2_low), ymax = log10(mean_pSMAD2_high)), width = 0.2) +
+      labs(title = ligand)
+
+  print(p)
+}
+
+```
+```{r fig.width = 10, fig.height = 8}
+# Normalizing pSMAD Expression 
+norm_binned_boot = binned_boot %>%
+  group_by(Ligand,Experiment) %>%
+  mutate(control_mean = mean_pSMAD2[Ligand_conc == 0 & binID == 1],
+         control_max = max(mean_pSMAD2)) %>%
+  mutate(norm_mean = (mean_pSMAD2 - control_mean) / (control_max - control_mean) ,
+         norm_mean_low = (mean_pSMAD2_low - control_mean)/ (control_max - control_mean),
+         norm_mean_high = (mean_pSMAD2_high - control_mean)/ (control_max - control_mean)
+         ) %>%
+  mutate(control_median = median_pSMAD2[Ligand_conc == 0 & binID == 1],
+         control_median_max = max(median_pSMAD2)) %>%
+  mutate(norm_median = (median_pSMAD2 - control_median) / (control_median_max - control_median),
+         norm_median_low = (median_pSMAD2_low - control_median)/ (control_median_max - control_median),
+         norm_median_high = (median_pSMAD2_high - control_median)/ (control_median_max - control_median)) %>%
+  ungroup()
+
+for (ligand in unique(norm_binned_boot$Ligand)){
+   temp = norm_binned_boot %>%
+    filter(Ligand == ligand)
+  
+  p = ggplot(temp, aes(x = binID, y = norm_mean, color = Experiment))+
+      geom_point()+
+      facet_grid(~ Ligand_conc, 
+                 labeller = labeller(.cols = label_both))+
+      labs(title = ligand)
+
+  print(p)
+}
+
+
+for (ligand in unique(norm_binned_boot$Ligand)){
+   temp = norm_binned_boot %>%
+    filter(Ligand == ligand)
+  
+  p = ggplot(temp, aes(x = binID, y = norm_mean))+
+      geom_point()+
+      facet_grid(Experiment ~ Ligand_conc, 
+                 labeller = labeller(.cols = label_both))+
+      geom_errorbar(aes(ymin = norm_mean_low, ymax = norm_mean_high), width = 0.2) +
+      labs(title = ligand)
+
+  print(p)
+}
+
+```
+
+```{r}
+data_dir = "Exported Data"
+
+binned_boot = run_bootstrap_analysis_pipeline(data_dir, 
+                                           pSMAD2_perc_cutoff = 0.75,
+                                           HA_perc_cutoff = 0.9,
+                                           n_bins = 8,
+                                           n_boot = 1000)
+
+binned_boot = binned_boot %>%
+  filter(n_cells > 30) %>%
+  group_by(Ligand, Experiment,Ligand_conc) %>%
+  arrange(HA_bin) %>%
+  mutate(binID = row_number()) %>%
+  ungroup()
+
+for(ligand in unique(binned_boot$Ligand)){
+  temp = binned_boot %>%
+    filter(Ligand == ligand)
+  
+  p = ggplot(temp, aes(x = binID, y = log10(mean_pSMAD2)))+
+      geom_point()+
+      facet_grid(Experiment ~ Ligand_conc, scale = "free", 
+                 labeller = labeller(.cols = label_both))+
+      geom_errorbar(aes(ymin = log10(mean_pSMAD2_low), ymax = log10(mean_pSMAD2_high)), width = 0.2) +
+      labs(title = ligand)
+
+  print(p)
+}
+
+
+# Plot with Experiments as different colors
+for(ligand in unique(binned_boot$Ligand)){
+  temp = binned_boot %>%
+    filter(Ligand == ligand)
+  
+  p = ggplot(temp, aes(x = binID, y = log10(mean_pSMAD2), color = Experiment))+
+      geom_point()+
+      facet_grid(~ Ligand_conc, scale = "free", 
+                 labeller = labeller(.cols = label_both))+
+      geom_errorbar(aes(ymin = log10(mean_pSMAD2_low), ymax = log10(mean_pSMAD2_high)), width = 0.2) +
+      labs(title = ligand)
+
+  print(p)
+}
+
+
+```
+```{r}
+# 2025-11-13 --> Different binning parameters for pSMAD2 threshold for all samples
+data_dir = "Exported Data"
+
+
+
+
+pSMAD2_perc_cutoff_list = c(0.9, 0.5, 0.1)
+
+for (pSMAD2_perc_cutoff in pSMAD2_perc_cutoff_list){
+
+binned_boot = run_bootstrap_analysis_pipeline(data_dir, 
+                                           pSMAD2_perc_cutoff = pSMAD2_perc_cutoff,
+                                           HA_perc_cutoff = 0.9,
+                                           n_bins = 8,
+                                           n_boot = 1000)
+
+binned_boot = binned_boot %>%
+  group_by(Ligand, Experiment,Ligand_conc) %>%
+  arrange(HA_bin) %>%
+  mutate(binID = row_number()) %>%
+  ungroup()
+
+for(ligand in unique(binned_boot$Ligand)){
+  temp = binned_boot %>%
+    filter(Ligand == ligand)
+  
+  p = ggplot(temp, aes(x = binID, y = log10(mean_pSMAD2)))+
+      geom_point()+
+      facet_grid(Experiment ~ Ligand_conc, scale = "free", 
+                 labeller = labeller(.cols = label_both))+
+      geom_errorbar(aes(ymin = log10(mean_pSMAD2_low), ymax = log10(mean_pSMAD2_high)), width = 0.2) +
+      labs(title = paste0(ligand, ", pSMAD2_perc_cutoff = ", pSMAD2_perc_cutoff))
+
+  print(p)
+}
+
+
+# Plot with Experiments as different colors
+for(ligand in unique(binned_boot$Ligand)){
+  temp = binned_boot %>%
+    filter(Ligand == ligand)
+  
+  p = ggplot(temp, aes(x = binID, y = log10(mean_pSMAD2), color = Experiment))+
+      geom_point()+
+      facet_grid(~ Ligand_conc, scale = "free", 
+                 labeller = labeller(.cols = label_both))+
+      geom_errorbar(aes(ymin = log10(mean_pSMAD2_low), ymax = log10(mean_pSMAD2_high)), width = 0.2) +
+      labs(title = paste0(ligand, ", pSMAD2_perc_cutoff = ", pSMAD2_perc_cutoff))
+
+  print(p)
+}
+
+}
+
+```
+```{r}
+# 5 Bins -- Same analysis as above 
+
+data_dir = "Exported Data"
+
+
+
+
+pSMAD2_perc_cutoff_list = c(0.9, 0.5, 0.1)
+
+all_runs = list()
+
+for (pSMAD2_perc_cutoff in pSMAD2_perc_cutoff_list){
+
+binned_boot = run_bootstrap_analysis_pipeline(data_dir, 
+                                           pSMAD2_perc_cutoff = pSMAD2_perc_cutoff,
+                                           HA_perc_cutoff = 0.9,
+                                           n_bins = 5,
+                                           n_boot = 1000)
+
+binned_boot = binned_boot %>%
+  group_by(Ligand, Experiment,Ligand_conc) %>%
+  arrange(HA_bin) %>%
+  mutate(binID = row_number()) %>%
+  ungroup() %>%
+  mutate(pSMAD2_perc_cutoff = pSMAD2_perc_cutoff)
+
+all_runs[[as.character(pSMAD2_perc_cutoff)]] = binned_boot
+
+for(ligand in unique(binned_boot$Ligand)){
+  temp = binned_boot %>%
+    filter(Ligand == ligand)
+  
+  p = ggplot(temp, aes(x = binID, y = mean_pSMAD2))+
+      geom_point()+
+      facet_grid(Experiment ~ Ligand_conc, scale = "free", 
+                 labeller = labeller(.cols = label_both))+
+      geom_errorbar(aes(ymin = mean_pSMAD2_low, ymax = mean_pSMAD2_high), width = 0.2) +
+      labs(title = paste0(ligand, ", pSMAD2_perc_cutoff = ", pSMAD2_perc_cutoff),
+           ylab = "mean log10(pSMAD2)")
+
+  print(p)
+}
+
+
+# Plot with Experiments as different colors
+for(ligand in unique(binned_boot$Ligand)){
+  temp = binned_boot %>%
+    filter(Ligand == ligand)
+  
+  p = ggplot(temp, aes(x = binID, y = mean_pSMAD2, color = Experiment))+
+      geom_point()+
+      facet_grid(~ Ligand_conc, scale = "free", 
+                 labeller = labeller(.cols = label_both))+
+      geom_errorbar(aes(ymin = mean_pSMAD2_low, ymax = mean_pSMAD2_high), width = 0.2) +
+      labs(title = paste0(ligand, ", pSMAD2_perc_cutoff = ", pSMAD2_perc_cutoff),
+           ylab = "mean log10(pSMAD2)")
+
+  print(p)
+}
+
+}
+
+final_df = dplyr::bind_rows(all_runs)
+
+```
+```{r fig.width=10, fig.heigh=8}
+for(ligand in unique(final_df$Ligand)){
+  temp = final_df %>%
+    filter(Ligand == ligand) %>%
+    mutate(pSMAD2_perc_cutoff = fct_rev(as.factor(pSMAD2_perc_cutoff)))
+  
+  p = ggplot(temp, aes(x = binID, y = mean_pSMAD2, color = pSMAD2_perc_cutoff))+
+      geom_point(size = 2)+
+      facet_grid(Experiment ~ Ligand_conc, scale = "free", 
+                 labeller = labeller(.cols = label_both))+
+      geom_errorbar(aes(ymin = mean_pSMAD2_low, ymax = mean_pSMAD2_high), width = 0.4) +
+      labs(title = ligand,
+           y = "mean log10(pSMAD2)")
+
+  print(p)
+}
+```
+
