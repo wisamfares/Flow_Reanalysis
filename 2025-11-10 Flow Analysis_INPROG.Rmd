@@ -344,7 +344,7 @@ data_dir = "Exported Data/TGFB1/5 Laser Experiments/2024-09-04/"
 
 agg_boot = compareBinningParameters(data_dir,
                                     pSMAD2_perc_cutoff_list = c(0.9, 0.5, 0),
-                                    HA_perc_cutoff_list = 0.9,
+                                    HA_perc_cutoff_list = 0.1,
                                     n_bins_list = c(5,8,10,20),
                                     is_3laser_experiment = FALSE)
 ```
@@ -845,8 +845,8 @@ for (pSMAD2_perc_cutoff in pSMAD2_perc_cutoff_list){
 
 binned_boot = run_bootstrap_analysis_pipeline(data_dir, 
                                            pSMAD2_perc_cutoff = pSMAD2_perc_cutoff,
-                                           HA_perc_cutoff = 0.9,
-                                           n_bins = 5,
+                                           HA_perc_cutoff = 0.1,
+                                           n_bins = 8,
                                            n_boot = 1000)
 
 binned_boot = binned_boot %>%
