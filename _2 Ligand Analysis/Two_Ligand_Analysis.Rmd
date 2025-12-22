@@ -1,0 +1,80 @@
+```{r setup, include=FALSE}
+library(tidyverse)
+library(fs)
+```
+
+
+```{r helper-functions}
+source("2L_helper.R")
+
+```
+
+```{r load-in-single-experiment, include=FALSE}
+# Load in Singlet and DAPI gated data
+all_exp_data = loadAllTwoLigandData("Two Ligand Data")
+```
+
+
+```{r load-in-single-experiment, include=FALSE}
+df = run_bootstrap_analysis_pipeline(all_exp_data,
+                                           pSMAD2_perc_cutoff = 0,
+                                           HA_perc_cutoff = 0.95,
+                                           n_bins = 10,
+                                           n_boot = 1000)
+```
+
+
+
+```{r}
+temp = df$binned_boot %>%
+  filter(Dox == "+dox") %>%
+  filter(GDF11 > 0, 
+         TGFB1 > 0)%>%
+  mutate(GDF11 = as.factor(GDF11),
+         TGFB1 = as.factor(TGFB1)) %>%
+  group_by(Experiment) %>%
+  mutate(new_norm_pSMAD2 = (mean_Norm_pSMAD2 - min(mean_Norm_pSMAD2)) /(max(mean_Norm_pSMAD2)-min(mean_Norm_pSMAD2))) %>%
+  ungroup()
+  
+
+ggplot(temp, aes(x = GDF11, y = TGFB1, fill = new_norm_pSMAD2))+
+  geom_tile()+
+  facet_wrap(Experiment ~ binID, scales = "free") + 
+  scale_x_discrete(drop = TRUE)+
+  scale_y_discrete(drop = TRUE)+
+  scale_fill_viridis_c(name = "Norm pSMAD2")
+```
+```{r}
+source("2L_helper.R")
+
+ZZ = loadAllOldTwoLigandData("Older Flow/")
+
+Old_df = run_bootstrap_analysis_pipeline(ZZ, 
+                                         pSMAD2_perc_cutoff = 0,
+                                           HA_perc_cutoff = 0.95,
+                                           n_bins = 10,
+                                           n_boot = 1000)
+```
+
+
+```{r}
+temp = rbind(Old_df$binned_boot, df$binned_boot) %>%
+  filter(Dox == "+dox") %>%
+  filter(GDF11 > 0 ,
+         TGFB1 > 0) %>%
+  mutate(GDF11 = as.factor(GDF11),
+         TGFB1 = as.factor(TGFB1)) %>%
+  #filter(Experiment == "2023-07-19") %>%
+  group_by(Experiment) %>%
+  mutate(new_norm_pSMAD2 = (median_Norm_pSMAD2 - min(median_Norm_pSMAD2)) /(max(median_Norm_pSMAD2)-min(median_Norm_pSMAD2))) %>%
+  ungroup()
+  
+
+ggplot(temp, aes(x = GDF11, y = TGFB1, fill = new_norm_pSMAD2))+
+  geom_tile()+
+  facet_wrap(Experiment ~ binID, scales = "free") + 
+  scale_x_discrete(drop = TRUE)+
+  scale_y_discrete(drop = TRUE)+
+  scale_fill_viridis_c(name = "Norm pSMAD2")
+```
+

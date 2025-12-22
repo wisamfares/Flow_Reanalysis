@@ -96,7 +96,8 @@ mutate(
       p001_HA = quantile(HA, 0.001),
       p999_HA = quantile(HA, 0.999)
     ) %>%
-
+  
+    # REMOVE OUTLIERS
       # Keep only rows within the 0.1-99.9 percentile
     filter(pSMAD2 >= p001_pSMAD2,
            pSMAD2 <= p999_pSMAD2,
@@ -303,12 +304,14 @@ loadAllData <- function(data_dir) {
 run_bootstrap_analysis_pipeline = function(data_dir, 
                                            pSMAD2_perc_cutoff = 0,
                                            HA_perc_cutoff = 0.9,
-                                           n_bins = 8,
+                                           n_bins = 10,
                                            n_boot = 1000){
-  all_exp_data = loadAllData(data_dir)
+  
+    # (1) Load Data
+    all_exp_data = loadAllData(data_dir)
   
   
-  # (2) Filter Data based on pSMAD2 and HA threshold of Luc - No Cytokine 
+    # (2) Filter Data based on pSMAD2 and HA threshold of Luc - No Cytokine 
     filtered_data = all_exp_data %>%
       group_by(Experiment) %>%
       ## Apply filterData to each group
@@ -757,7 +760,7 @@ for (exp in unique(all_exp_data$Experiment)){
   temp = all_exp_data %>%
     filter(Experiment == exp) %>%
     filter(Dox == "+dox") %>%
-    filter(Ligand == "TGFB1") %>%
+    filter(Ligand != "GDF11") %>%
     filter(Ligand_conc != 10) %>%
     group_by(Experiment) %>%
     filter(DAPI <= quantile(DAPI,0.70),

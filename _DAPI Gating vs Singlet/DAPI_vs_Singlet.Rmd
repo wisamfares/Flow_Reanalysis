@@ -1,0 +1,445 @@
+---
+title: "DAPI vs Singlet Gating Results"
+author: "Wisam Fares"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(fs)
+```
+
+
+```{r helper-functions}
+source("helper.R")
+
+```
+
+```{r load-in-single-experiment, include=FALSE}
+# Load in Singlet and DAPI gated data
+all_exp_data = loadAllData("Data/")
+```
+
+```{r load-in-single-experiment}
+# (1) Pick an Experiment
+
+
+DAPI_sub = all_exp_data %>%
+  filter(Gate == "DAPI")
+
+Sing_sub = all_exp_data %>%
+  filter(Gate == "Singlet")
+
+DAPI_res = run_bootstrap_analysis_pipeline(DAPI_sub, 
+                                 pSMAD2_perc_cutoff = 0,
+                                 HA_perc_cutoff = 0.95,
+                                 n_bins = 10,
+                                 n_boot = 1000)
+
+Sing_res = run_bootstrap_analysis_pipeline(Sing_sub,
+                                           pSMAD2_perc_cutoff = 0,
+                                 HA_perc_cutoff = 0.95,
+                                 n_bins = 10,
+                                 n_boot = 1000)
+
+
+```
+
+```{r compare-DAPI-vs-Singlet}
+# Compare the binning analysis from DAPI gated and Singlet gated data
+DAPI_binned_boot = DAPI_res$binned_boot %>%
+  mutate(Gate = "DAPI")
+Sing_binned_boot = Sing_res$binned_boot %>%
+  mutate(Gate = "Singlet")
+
+both_binned_boot = rbind(DAPI_binned_boot, Sing_binned_boot)
+```
+
+
+```{r}
+library(pheatmap)
+
+temp = Sing_binned_boot %>%
+  filter(Ligand_conc == 0,
+         Dox == "+dox") %>%
+  mutate(ExpRep = paste0(Experiment, " #", Replicate),
+         binID = as.character(binID)) %>%
+  select(ExpRep, binID, mean_Norm_pSMAD2) %>%
+  group_by(ExpRep) %>%
+  mutate(mean_Norm_pSMAD2 = mean_Norm_pSMAD2 - mean(mean_Norm_pSMAD2)) %>%
+  ungroup() %>%
+  pivot_wider(
+    names_from = binID,
+    values_from = mean_Norm_pSMAD2
+  ) %>%
+  column_to_rownames(var = "ExpRep")
+
+mat = as.matrix(temp)
+
+
+pheatmap(mat,
+         scale = "none",
+         breaks = seq(-0.04,0.04, length.out = 101),
+         clustering_method = "ward.D2",
+         cluster_cols = FALSE,
+         main = "Singlet Gated - No Cytokine Binned Analysis")
+```
+
+
+
+```{r}
+temp = DAPI_binned_boot %>%
+  filter(Ligand_conc == 0,
+         Dox == "+dox") %>%
+  mutate(ExpRep = paste0(Experiment, " #", Replicate),
+         binID = as.character(binID)) %>%
+  select(ExpRep, binID, mean_Norm_pSMAD2) %>%
+  group_by(ExpRep) %>%
+  mutate(mean_Norm_pSMAD2 = mean_Norm_pSMAD2 - mean(mean_Norm_pSMAD2)) %>%
+  ungroup() %>%
+  pivot_wider(
+    names_from = binID,
+    values_from = mean_Norm_pSMAD2
+  ) %>%
+  column_to_rownames(var = "ExpRep")
+
+mat = as.matrix(temp)
+
+
+pheatmap(mat,
+         scale = "none",
+         breaks = seq(-0.04,0.04, length.out = 101),
+         clustering_method = "ward.D2",
+         cluster_cols = FALSE,
+         main = "DAPI G0/G1 Gated - No Cytokine Binned Analysis")
+```
+
+```{r}
+temp = Sing_binned_boot %>%
+  filter(Dox == "+dox") %>%
+  filter(!grepl("GDF11", Ligand)) %>%
+  mutate(ExpRep = paste0(Experiment, " #" , Replicate))
+
+
+for(lig_conc in unique(temp$Ligand_conc)){
+  if (lig_conc == 0){
+    next
+  }
+  
+  temp2 = temp %>%
+    semi_join(
+    temp %>% filter(Ligand_conc == lig_conc) %>% distinct(ExpRep),
+    by = "ExpRep"
+  ) %>%
+  filter(Ligand_conc %in% c(0, lig_conc))
+    
+p = ggplot(temp2, aes(x = binID, y = mean_Norm_pSMAD2))+
+  geom_point()+
+        geom_errorbar(aes(ymin = mean_Norm_pSMAD2_low, ymax = mean_Norm_pSMAD2_high), width = 0.2) +
+        facet_grid( ExpRep ~ Ligand_conc, scale = "free", 
+                   labeller = labeller(.cols = label_both))+
+        labs(title = paste0("DAPI G0/G1 Gated, TGFB1 = ", lig_conc, " ng/ml"))
+  
+    print(p)
+} 
+```
+
+```{r}
+temp = DAPI_binned_boot %>%
+  filter(Ligand != "GDF11") %>%
+  filter(Dox == "+dox")
+  
+for(exp in unique(temp$Experiment)){
+  temp2 = temp %>%
+    filter(Experiment == exp)
+  
+  p = ggplot(temp2, aes(x = binID, y = mean_Norm_pSMAD2))+
+    geom_point()+
+    geom_errorbar(aes(ymin = mean_Norm_pSMAD2_low, ymax = mean_Norm_pSMAD2_high), width = 0.2) +
+    facet_grid(Replicate~Ligand_conc)+
+    labs(title = paste0("DAPI G0/G1 Gated - Experiment ", exp))
+  
+  print(p)
+}
+```
+```{r}
+temp = Sing_binned_boot %>%
+  filter(Ligand != "GDF11") %>%
+  filter(Dox == "+dox")
+  
+for(exp in unique(temp$Experiment)){
+  temp2 = temp %>%
+    filter(Experiment == exp)
+  
+  p = ggplot(temp2, aes(x = binID, y = mean_Norm_pSMAD2))+
+    geom_point()+
+    geom_errorbar(aes(ymin = mean_Norm_pSMAD2_low, ymax = mean_Norm_pSMAD2_high), width = 0.2) +
+    facet_grid(Replicate~Ligand_conc)+
+    labs(title = paste0("Singlet Gated - Experiment ", exp))
+  
+  print(p)
+}
+```
+```{r}
+# DAPI
+temp = rbind(DAPI_binned_boot, Sing_binned_boot) %>%
+  filter(Dox == "+dox") %>%
+  filter(Ligand != "GDF11") %>%
+  filter(Ligand_conc !=10) %>%
+  filter(Replicate == 1)
+
+
+for(exp in unique(temp$Experiment)){
+  temp2 = temp %>%
+    filter(Experiment == exp)
+  
+  p = ggplot(temp2, aes(x = binID, y = mean_Norm_pSMAD2, color = Gate))+
+    geom_point()+
+    geom_errorbar(aes(ymin = mean_Norm_pSMAD2_low, ymax = mean_Norm_pSMAD2_high), width = 0.2) +
+    facet_grid(Replicate~Ligand_conc)+
+    labs(title = paste0("TGFB1 - Experiment ", exp))
+  
+  print(p)
+}
+```
+```{r}
+# DAPI
+temp = rbind(DAPI_binned_boot, Sing_binned_boot) %>%
+  filter(Dox == "+dox") %>%
+  filter(Ligand != "TGFB1")
+
+
+for(exp in unique(temp$Experiment)){
+  temp2 = temp %>%
+    filter(Experiment == exp)
+  
+  p = ggplot(temp2, aes(x = binID, y = mean_Norm_pSMAD2, color = Gate))+
+    geom_point()+
+    geom_errorbar(aes(ymin = mean_Norm_pSMAD2_low, ymax = mean_Norm_pSMAD2_high), width = 0.2) +
+    facet_grid(Replicate~Ligand_conc)+
+    labs(title = paste0("GDF11 - Experiment ", exp))
+  
+  print(p)
+}
+```
+
+
+```{r}
+DAPI_minmax = DAPI_binned_boot %>%
+  filter(Cell_Line == "R3",
+         Ligand != "GDF11",
+         Ligand_conc != 10,
+         Ligand_conc >= 0.1,
+         Dox == "+dox",
+         Replicate == 1) %>%
+  group_by(Experiment, Replicate, Ligand,
+           Ligand_conc) %>%
+  summarize(min = min(mean_Norm_pSMAD2),
+            max = max(mean_Norm_pSMAD2),
+            range = max - min) %>%
+  filter(n() >= 3) %>%
+  ungroup() %>%
+  group_by(Experiment, Replicate, Ligand) %>%
+  mutate(norm_range = range/max(range)) %>%
+  ungroup()
+
+head(DAPI_minmax)
+ggplot(DAPI_minmax, aes(x = log10(Ligand_conc), y = log10(range)))+
+  geom_point()+
+  facet_wrap(~Experiment, scales = "free_y")+
+  labs(title = "Range of Normalized pSMAD2 across experiments and ligand concentrations")
+
+
+ggplot(DAPI_minmax, aes(x = Ligand_conc, y = range, color=Experiment))+
+  geom_point()+
+  labs(title = "Range of Normalized pSMAD2 across experiments and ligand concentrations")
+
+ggplot(DAPI_minmax, aes(x = log10(Ligand_conc), y = range, color=Experiment))+
+  geom_line()+
+  geom_point(size=2)+
+  labs(title = "Range of Normalized pSMAD2 across experiments and ligand concentrations")
+
+ggplot(DAPI_minmax, aes(x = log10(Ligand_conc), y = norm_range, color=Experiment))+
+  geom_line()+
+  geom_point(size=2)+
+  labs(title = "Range of Normalized pSMAD2 across experiments and ligand concentrations")
+
+write.csv(DAPI_minmax, "DAPI_minmax_export.csv")
+```
+
+
+```{r}
+Sing_minmax = Sing_binned_boot %>%
+  filter(Cell_Line == "R3",
+         Ligand != "TGFB1",
+         Dox == "+dox",
+         Replicate == 1) %>%
+  group_by(Experiment, Replicate, Ligand,
+           Ligand_conc) %>%
+  summarize(min = min(mean_Norm_pSMAD2),
+            max = max(mean_Norm_pSMAD2),
+            range = max - min) %>%
+  filter(n() >= 3) %>%
+  ungroup()
+
+ggplot(Sing_minmax, aes(x = log10(Ligand_conc), y = log10(range)))+
+  geom_point()+
+  facet_wrap(~Experiment, scales = "free_y")+
+  labs(title = "Range of Normalized pSMAD2 across experiments and ligand concentrations")
+
+
+ggplot(Sing_minmax, aes(x = Ligand_conc, y = range, color=Experiment))+
+  geom_point()+
+  labs(title = "Range of Normalized pSMAD2 across experiments and ligand concentrations")
+```
+ 
+```{r}
+DAPI_minmax = DAPI_binned_boot %>%
+  filter(Cell_Line == "R3",
+         Ligand != "TGFB1",
+         Ligand_conc > 0,
+         Dox == "+dox",
+         Replicate == 1) %>%
+  group_by(Experiment, Replicate, Ligand,
+           Ligand_conc) %>%
+  summarize(min = min(mean_Norm_pSMAD2),
+            max = max(mean_Norm_pSMAD2),
+            range = max - min) %>%
+  ungroup() %>%
+  group_by(Experiment, Replicate, Ligand) %>%
+  mutate(norm_range = range/max(range)) %>%
+  ungroup()
+
+head(DAPI_minmax)
+ggplot(DAPI_minmax, aes(x = log10(Ligand_conc), y = log10(range)))+
+  geom_point()+
+  facet_wrap(~Experiment, scales = "free_y")+
+  labs(title = "Range of Normalized pSMAD2 across experiments and ligand concentrations")
+
+
+ggplot(DAPI_minmax, aes(x = Ligand_conc, y = range, color=Experiment))+
+  geom_point()+
+  labs(title = "Range of Normalized pSMAD2 across experiments and ligand concentrations")
+
+ggplot(DAPI_minmax, aes(x = log10(Ligand_conc), y = range, color=Experiment))+
+  geom_line()+
+  geom_point(size=2)+
+  labs(title = "Range of Normalized pSMAD2 across experiments and ligand concentrations")
+
+ggplot(DAPI_minmax, aes(x = log10(Ligand_conc), y = norm_range, color=Experiment))+
+  geom_line()+
+  geom_point(size=2)+
+  labs(title = "Range of Normalized pSMAD2 across experiments and ligand concentrations")
+```
+```{r}
+# Two Ligand 
+all_two_lig = loadAllTwoLigandData("Two Ligand Data/")
+```
+```{r}
+# filt_2L_data = filterData(all_two_lig, Norm_pSMAD2_perc_cutoff = 0, HA_perc_cutoff = 0.95)
+
+
+## TEMP CALC HA LOWER BOUND FROM MIN DATA FOR EACH
+temp = DAPI_res$filtered_data %>%
+  filter(Experiment == "2024-03-25")
+
+min(temp$HA)
+
+temp = DAPI_res$filtered_data %>%
+  filter(Experiment == "2024-09-04")
+
+min(temp$HA)
+```
+
+```{r}
+bin2L = binHA(all_two_lig,n_bins = 10)
+
+
+temp = bin2L %>%
+  group_by(Experiment, TGFB1, GDF11, binID) %>%
+  summarize(mean_Norm_pSMAD2 = mean(Norm_pSMAD2))
+
+
+for(exp in unique(temp$Experiment)){
+
+temp2 = temp %>%
+  filter(Experiment == exp)
+
+p = ggplot(temp2, aes(x = as.factor(TGFB1), y = as.factor(GDF11), fill = mean_Norm_pSMAD2))+
+  geom_tile()+
+  facet_wrap(binID~Experiment)+
+  scale_fill_viridis_c(name = "Norm pSMAD2")+
+  coord_equal()
+
+print(p)
+}
+```
+```{r}
+temp = temp %>%
+  mutate(TGFB1 = as.numeric(TGFB1, levels = sort(unique(TGFB1))),
+         GDF11 = as.numeric(GDF11, levels = sort(unique(GDF11))))
+
+
+
+for(exp in unique(temp$Experiment)){
+  temp2 = temp %>%
+    filter(Experiment == exp)
+  
+  p = ggplot(temp2, aes(x = binID, y = mean_Norm_pSMAD2))+
+    geom_point()+
+    facet_wrap(TGFB1~GDF11)
+    
+  print(p)
+  
+}
+
+
+```
+```{r}
+
+source("helper.R")
+test = all_two_lig %>%
+  group_by(Experiment,TGFB1,GDF11)
+
+bin2L = binHA_deciles(test,n_bins = 10)
+
+
+temp = bin2L %>%
+  group_by(Experiment, TGFB1, GDF11, binID) %>%
+  summarize(mean_Norm_pSMAD2 = mean(Norm_pSMAD2))
+
+
+for(exp in unique(temp$Experiment)){
+
+temp2 = temp %>%
+  filter(Experiment == exp)
+
+p = ggplot(temp2, aes(x = as.factor(TGFB1), y = as.factor(GDF11), fill = mean_Norm_pSMAD2))+
+  geom_tile()+
+  facet_wrap(binID~Experiment)+
+  scale_fill_viridis_c(name = "Norm pSMAD2")+
+  coord_equal()
+
+print(p)
+}
+```
+```{r}
+temp = temp %>%
+  mutate(TGFB1 = as.numeric(TGFB1, levels = sort(unique(TGFB1))),
+         GDF11 = as.numeric(GDF11, levels = sort(unique(GDF11))))
+
+
+
+for(exp in unique(temp$Experiment)){
+  temp2 = temp %>%
+    filter(Experiment == exp)
+  
+  p = ggplot(temp2, aes(x = binID, y = mean_Norm_pSMAD2))+
+    geom_point()+
+    facet_wrap(TGFB1~GDF11)
+    
+  print(p)
+  
+}
+```
