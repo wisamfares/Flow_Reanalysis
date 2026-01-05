@@ -1,0 +1,286 @@
+---
+title: "Heatmap Visualization and Summarization for Manuscript"
+author: "Wisam"
+date: "2026-01-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(fs)
+```
+
+```{r load-Signal-Heatmap-df}
+# Read in Signal_Heatmaps.csv -- generated from Two_Ligand_Analysis.Rmd
+Signal_Heatmap_df = read_csv("Signal_Heatmaps.csv") %>%
+  mutate(GDF11 = as.factor(GDF11),
+         TGFB1 = as.factor(TGFB1),
+         Experiment = as.factor(Experiment))
+```
+
+```{r}
+ggplot(Signal_Heatmap_df, aes(x = GDF11, y = TGFB1, fill = new_norm_pSMAD2))+
+  geom_tile()+
+  facet_wrap(Experiment ~ binID, scales = "free", ncol = 10) + 
+  scale_x_discrete(drop = TRUE)+
+  scale_y_discrete(drop = TRUE)+
+  scale_fill_viridis_c(name = "Norm pSMAD2")
+```
+```{r outer-edge-plots}
+outer_edge_df = Signal_Heatmap_df %>%
+  mutate(
+    TGFB1 = as.numeric(as.character(TGFB1)),
+    GDF11 = as.numeric(as.character(GDF11))
+    ) %>%
+  filter(
+    TGFB1 == max(TGFB1) |
+    GDF11 == max(GDF11)
+  ) 
+
+edge_order = data.frame(
+  TGFB1 = c(3.16, 3.16, 3.16, 3.16, 1, 0.316, 0),
+  GDF11 = c(0, 2.5, 7.9, 25, 25, 25, 25),
+  edge_idx = 1:7
+)
+
+outer_edge_df = outer_edge_df %>%
+  inner_join(edge_order, by = c("TGFB1", "GDF11")) %>%
+  arrange(Experiment, edge_idx)
+
+
+# Edge_idx x, binID facet
+ggplot(outer_edge_df, aes(x = edge_idx, y = new_norm_pSMAD2, color = Experiment)) +
+  geom_point()+
+  geom_line()+
+  facet_wrap(~binID)+
+  ggtitle("x = edge_idx, facet = binID")
+
+
+# Edge_idx facet, binID x
+ggplot(outer_edge_df, aes(x = binID, y = new_norm_pSMAD2, color = Experiment)) +
+  geom_point()+
+  geom_line()+
+  facet_wrap(~edge_idx)+
+  ggtitle("x = binID, facet = edge_idx")
+```
+
+```{r}
+summ_edge = outer_edge_df %>%
+  group_by(binID, edge_idx) %>%
+  summarize(mean_new_norm_pSMAD2 = mean(new_norm_pSMAD2),
+            sd_new_norm_pSMAD2 = sd(new_norm_pSMAD2)) %>%
+  ungroup()
+
+ggplot(summ_edge, aes(x = edge_idx, y = mean_new_norm_pSMAD2))+
+  facet_wrap(~binID)+
+  geom_point()+
+  geom_line()+
+  geom_errorbar(
+    aes(ymin = mean_new_norm_pSMAD2 - sd_new_norm_pSMAD2,
+        ymax = mean_new_norm_pSMAD2 + sd_new_norm_pSMAD2),
+    width = 0.1
+  )+
+  theme_classic()
+
+
+ggplot(summ_edge, aes(x = binID, y = mean_new_norm_pSMAD2))+
+  facet_wrap(~edge_idx)+
+  geom_point()+
+  geom_line()+
+  geom_errorbar(
+    aes(ymin = mean_new_norm_pSMAD2 - sd_new_norm_pSMAD2,
+        ymax = mean_new_norm_pSMAD2 + sd_new_norm_pSMAD2),
+    width = 0.1
+  )+
+  theme_classic()
+```
+
+
+```{r RLS-LIC-walks}
+calcLIC = function(outer_edge, a, b){
+  satmin = min(outer_edge)
+  satmax = max(outer_edge)
+  
+  LIC = satmin/a - b/satmax
+}
+
+
+Summ_2L = Signal_Heatmap_df %>%
+  group_by(Experiment, binID) %>%
+  summarize(a = min(new_norm_pSMAD2[TGFB1 == '0' & GDF11 == '25'],
+                    new_norm_pSMAD2[TGFB1 == '3.16' & GDF11 == '0']),
+            b = max(new_norm_pSMAD2[TGFB1 == '0' & GDF11 == '25'],
+                    new_norm_pSMAD2[TGFB1 == '3.16' & GDF11 == '0']),
+            RLS = a/b,
+            LIC = calcLIC(outer_edge = 
+                            new_norm_pSMAD2[TGFB1 ==  '3.16' | 
+                                              GDF11 == '25'],
+                          a = a, 
+                          b = b),
+            satmin = min(new_norm_pSMAD2[TGFB1 == '3.16' | GDF11 == '25']),
+            satmax = max(new_norm_pSMAD2[TGFB1 == '3.16' | GDF11 == '25'])
+  ) %>%
+  ungroup()
+
+ggplot(Summ_2L, aes(x = LIC, y = RLS, color = Experiment))+
+  geom_path()+
+  geom_point(size = 2)+
+  geom_text(aes(label = binID), vjust = -0.7)+
+  ylim(c(0,1))+
+  xlim(c(-1,1))+
+  theme_classic()+
+  ggtitle("Without averaging outer edge")
+```
+```{r Seq-Eucl-Distance-RLS-LIC-Space}
+## KAJ: Calculate the sequential RLS-LIC Euclidean distances for 1...7 (group 1) 
+## and 7...10 (group 2).  Retain color coding by experiment.  I predict a 
+## significantly larger set of distances for group 2 compared to group 1.
+library(ggpubr)
+# This code requires that Summ_2L is created from the previous code block
+
+# Calculate Euclidean distance in RLS-LIC space
+groupID_cutoff = 7
+
+RLS_LIC_diff = Summ_2L %>%
+  arrange(Experiment, binID) %>%
+  group_by(Experiment) %>%
+  mutate(
+    diff_RLS = RLS - lag(RLS),
+    diff_LIC = LIC - lag(LIC),
+    diffID = row_number() - 1,
+    Eucl_diff = sqrt(diff_RLS^2 + diff_LIC^2),
+    theta = atan2(diff_RLS,diff_LIC)
+  ) %>% 
+  ungroup() %>%
+  filter(!is.na(Eucl_diff)) %>%
+  mutate(groupID =
+    factor(case_when(
+      diffID < groupID_cutoff ~ '1',
+      diffID >= groupID_cutoff ~ '2'
+    ))
+  )
+
+ggplot(RLS_LIC_diff, aes(x = groupID, y = Eucl_diff, color = Experiment)) +
+  geom_point()+
+  facet_wrap(~Experiment)+
+  theme_classic()+
+  ggtitle("Group cutoff at binID =  7")+
+   stat_compare_means(
+    aes(group = groupID),
+    method = "wilcox.test",
+    exact = TRUE,
+    label = "p.format",
+    comparisons = list(c('1', '2'))
+  ) 
+
+summ = RLS_LIC_diff %>%
+  group_by(Experiment) %>%
+  summarize(p_val = wilcox.test(Eucl_diff ~ groupID)$p.value)
+
+
+anova_model = aov(Eucl_diff ~ Experiment * groupID, data = RLS_LIC_diff)
+summary(anova_model)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# SUPPLEMENT 
+```{r RLS-LIC-traces-with-averaging-outer-edge}
+Summ_2L = Signal_Heatmap_df %>%
+  group_by(Experiment, binID) %>%
+  summarize(a = min(new_norm_pSMAD2[TGFB1 == '0' & GDF11 == '25'],
+                    new_norm_pSMAD2[TGFB1 == '3.16' & GDF11 == '0']),
+            b = max(new_norm_pSMAD2[TGFB1 == '0' & GDF11 %in% c('7.9', '25')],
+                    new_norm_pSMAD2[TGFB1 %in% c('1','3.16') & GDF11 == '0']),
+            RLS = a/b,
+            LIC = calcLIC(outer_edge = 
+                            new_norm_pSMAD2[TGFB1 %in% c('1', '3.16') | 
+                                              GDF11 %in% c('7.9', '25')],
+                          a = a, 
+                          b = b),
+            satmin = min(new_norm_pSMAD2[TGFB1 == '3.16' | GDF11 == '25']),
+            satmax = max(new_norm_pSMAD2[TGFB1 == '3.16' | GDF11 == '25'])
+  ) %>%
+  ungroup()
+
+
+ggplot(Summ_2L, aes(x = LIC, y = RLS, color = Experiment))+
+  geom_path()+
+  geom_point(size = 2)+
+  geom_text(aes(label = binID), vjust = -0.7)+
+  ylim(c(0,1))+
+  xlim(c(-1,1))+
+  theme_classic()+
+  ggtitle("With averaging outer edge")
+```
+
+```{r RLS-LIC-traces-1-7-subset}
+filt_summ = Summ_2L %>%
+  filter(binID <8)
+
+ggplot(filt_summ, aes(x = LIC, y = RLS, color = Experiment))+
+  geom_path()+
+  geom_point(size = 2)+
+  geom_text(aes(label = binID), vjust = -0.7)+
+  ylim(c(0,1))+
+  xlim(c(-1,1))+
+  theme_classic()+
+  ggtitle("Without averaging outer edge, subset 1-7")
+```
+
+```{r RLS-LIC-traces-odd-only}
+filt_summ = Summ_2L %>%
+  filter(binID%%2 == 1)
+
+ggplot(filt_summ, aes(x = LIC, y = RLS, color = Experiment))+
+  geom_path()+
+  geom_point(size = 2)+
+  geom_text(aes(label = binID), vjust = -0.7)+
+  ylim(c(0,1))+
+  xlim(c(-1,1))+
+  theme_classic()+
+  ggtitle("Without averaging outer edge, odd indices only")
+```
+
+```{r RLS-LIC-traces-even-only}
+filt_summ = Summ_2L %>%
+  filter(binID%%2 == 0)
+
+ggplot(filt_summ, aes(x = LIC, y = RLS, color = Experiment))+
+  geom_path()+
+  geom_point(size = 2)+
+  geom_text(aes(label = binID), vjust = -0.7)+
+  ylim(c(0,1))+
+  xlim(c(-1,1))+
+  theme_classic()+
+  ggtitle("Without averaging outer edge, even indices only")
+```
+

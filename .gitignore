@@ -5,4 +5,5 @@
 *.svg
 *.ai
 *.emf
+*.Rdata
 .Rhistory
