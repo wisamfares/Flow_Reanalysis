@@ -3,4 +3,6 @@
 *.fey
 *.png
 *.svg
+*.ai
+*.emf
 .Rhistory
