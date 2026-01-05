@@ -60,8 +60,8 @@ Old_df = run_bootstrap_analysis_pipeline(ZZ,
 ```{r}
 temp = rbind(Old_df$binned_boot, df$binned_boot) %>%
   filter(Dox == "+dox") %>%
-  filter(GDF11 > 0 ,
-         TGFB1 > 0) %>%
+   # filter(GDF11 == 0 | GDF11 > 7 ,
+   #        TGFB1 == 0 | TGFB1 > 0.9) %>%
   mutate(GDF11 = as.factor(GDF11),
          TGFB1 = as.factor(TGFB1)) %>%
   #filter(Experiment == "2023-07-19") %>%
@@ -72,9 +72,78 @@ temp = rbind(Old_df$binned_boot, df$binned_boot) %>%
 
 ggplot(temp, aes(x = GDF11, y = TGFB1, fill = new_norm_pSMAD2))+
   geom_tile()+
-  facet_wrap(Experiment ~ binID, scales = "free") + 
+  facet_grid(Experiment ~ binID, scales = "free") + 
   scale_x_discrete(drop = TRUE)+
   scale_y_discrete(drop = TRUE)+
   scale_fill_viridis_c(name = "Norm pSMAD2")
+```
+```{r}
+ggplot(temp, aes(x = binID, y = new_norm_pSMAD2, color = Experiment))+
+  geom_point()+
+  facet_grid(GDF11~TGFB1)
+
+```
+```{r}
+temp = rbind(Old_df$binned_boot, df$binned_boot) %>%
+  filter(Dox == "+dox") %>%
+   # filter(GDF11 == 0 | GDF11 > 7 ,
+   #        TGFB1 == 0 | TGFB1 > 0.9) %>%
+  mutate(GDF11 = as.factor(GDF11),
+         TGFB1 = as.factor(TGFB1)) %>%
+  #filter(Experiment == "2023-07-19") %>%
+  group_by(Experiment) %>%
+  mutate(new_norm_pSMAD2 = (mean_Norm_pSMAD2 - min(mean_Norm_pSMAD2)) /(max(mean_Norm_pSMAD2)-min(mean_Norm_pSMAD2))) %>%
+  ungroup()
+  
+
+ggplot(temp, aes(x = GDF11, y = TGFB1, fill = new_norm_pSMAD2))+
+  geom_tile()+
+  facet_grid(Experiment ~ binID, scales = "free") + 
+  scale_x_discrete(drop = TRUE)+
+  scale_y_discrete(drop = TRUE)+
+  scale_fill_viridis_c(name = "Norm pSMAD2")
+```
+```{r}
+ggplot(temp, aes(x = binID, y = new_norm_pSMAD2, color = Experiment))+
+  geom_point()+
+  facet_grid(GDF11~TGFB1)
+
+```
+```{r}
+temp = rbind(Old_df$binned_boot, df$binned_boot) %>%
+  filter(Dox == "+dox") %>%
+  filter(!(Experiment == "2023-07-19")) %>%
+  filter(!(TGFB1 == 50 & GDF11 == 2.5)) %>%
+  mutate(GDF11 = as.factor(GDF11),
+         TGFB1 = as.factor(TGFB1)) %>%
+  #filter(Experiment == "2023-07-19") %>%
+  group_by(Experiment) %>%
+  mutate(new_norm_pSMAD2 = (mean_Norm_pSMAD2 - min(mean_Norm_pSMAD2)) /(max(mean_Norm_pSMAD2)-min(mean_Norm_pSMAD2))) %>%
+  ungroup()
+
+ggplot(temp, aes(x = GDF11, y = TGFB1, fill = new_norm_pSMAD2))+
+  geom_tile()+
+  facet_wrap(Experiment ~ binID, scales = "free", ncol = 10) + 
+  scale_x_discrete(drop = TRUE)+
+  scale_y_discrete(drop = TRUE)+
+  scale_fill_viridis_c(name = "Norm pSMAD2")
+```
+```{r}
+temp_summ = temp %>%
+  group_by(Experiment, TGFB1, GDF11) %>%
+  summarize(minmax = range(new_norm_pSMAD2)) %>%
+  ungroup()
+
+View(temp_summ)
+
+ggplot(temp_summ, aes(x = GDF11, y = TGFB1, fill = minmax))+
+  geom_tile()+
+  facet_wrap(~ Experiment, scales = "free", ncol = 10) + 
+  scale_x_discrete(drop = TRUE)+
+  scale_y_discrete(drop = TRUE)+
+  scale_fill_viridis_c(name = "Norm pSMAD2")
+```
+```{r, testing-new-labels}
+
 ```
 

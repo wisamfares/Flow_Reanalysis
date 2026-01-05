@@ -2,3 +2,5 @@
 *.fcs
 *.fey
 *.png
+*.svg
+.Rhistory

@@ -8,6 +8,7 @@ output: html_document
 ```{r setup, include=FALSE}
 library(tidyverse)
 library(fs)
+library(svglite)
 ```
 
 
@@ -88,7 +89,7 @@ pheatmap(mat,
 
 
 
-```{r}
+```{r, fig.width = 3, fig.height= 3}
 temp = DAPI_binned_boot %>%
   filter(Ligand_conc == 0,
          Dox == "+dox") %>%
@@ -107,12 +108,21 @@ temp = DAPI_binned_boot %>%
 mat = as.matrix(temp)
 
 
-pheatmap(mat,
+p = pheatmap(mat,
          scale = "none",
          breaks = seq(-0.04,0.04, length.out = 101),
          clustering_method = "ward.D2",
          cluster_cols = FALSE,
-         main = "DAPI G0/G1 Gated - No Cytokine Binned Analysis")
+         main = "-Cyto Binned Analysis",
+         show_rownames = FALSE,
+         show_colnames = FALSE
+         )
+
+saveFigure = function(p, fileName, width = 3, height = 3){
+  ggsave(fileName, plot = p, width = width, height = height)
+}
+
+saveFigure(p, "DAPI_heatmap.svg")
 ```
 
 ```{r}
@@ -225,7 +235,7 @@ for(exp in unique(temp$Experiment)){
 ```
 
 
-```{r}
+```{r, scratch-work}
 DAPI_minmax = DAPI_binned_boot %>%
   filter(Cell_Line == "R3",
          Ligand != "GDF11",
@@ -266,6 +276,46 @@ ggplot(DAPI_minmax, aes(x = log10(Ligand_conc), y = norm_range, color=Experiment
   labs(title = "Range of Normalized pSMAD2 across experiments and ligand concentrations")
 
 write.csv(DAPI_minmax, "DAPI_minmax_export.csv")
+```
+
+
+```{r, semi-finalized-fig-3H, fig.width = 2, fig.height = 3}
+## SEMI-FINALIZED FIGURE 3H
+DAPI_minmax = DAPI_binned_boot %>%
+  filter(Cell_Line == "R3",
+         Ligand != "GDF11",
+         Ligand_conc != 10,
+         Ligand_conc >= 0.1,
+         Dox == "+dox",
+         Replicate == 1) %>%
+  group_by(Experiment, Replicate, Ligand,
+           Ligand_conc) %>%
+  summarize(min = min(mean_Norm_pSMAD2),
+            max = max(mean_Norm_pSMAD2),
+            range = max - min) %>%
+  filter(n() >= 3) %>%
+  ungroup() %>%
+  group_by(Experiment, Replicate, Ligand) %>%
+  mutate(norm_range = range/max(range)) %>%
+  ungroup()
+
+p = ggplot(DAPI_minmax, aes(x = log10(Ligand_conc), y = range, shape=Experiment))+
+  geom_line()+
+  geom_point(size=2)+
+  theme_classic(base_size = 9)+
+  scale_y_reverse()+
+  scale_x_continuous(position = "top")+
+  theme(legend.position = "none",
+        axis.title = element_text(size = 8),
+        axis.text = element_text(size = 8))+
+  ylab("pSMAD2/SMAD2 Range")+
+  xlab("log[TGFB1]")
+
+saveFigure = function(p, fileName, width = 2, height = 2.75){
+  ggsave(fileName, plot = p, width = width, height = height)
+}
+
+saveFigure(p, "Figure_3H_norm_pSMAD2_Traces.svg")
 ```
 
 
